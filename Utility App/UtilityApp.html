@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>UPC Session Scanner - Step 7</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #111827;
+        color: #e5e7eb;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+      }
+      .app {
+        max-width: 900px;
+        width: 100%;
+        padding: 24px;
+      }
+      h1 {
+        margin-top: 0;
+        text-align: center;
+      }
+      .panel {
+        background: #1f2933;
+        padding: 16px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+      }
+      .panel h2 {
+        margin-top: 0;
+        font-size: 18px;
+      }
+      label {
+        display: block;
+        margin-bottom: 4px;
+      }
+      input[type="file"],
+      input[type="text"] {
+        width: 100%;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #4b5563;
+        background: #111827;
+        color: #e5e7eb;
+        box-sizing: border-box;
+      }
+      input[type="text"] {
+        font-size: 18px;
+      }
+      .status-box {
+        margin-top: 12px;
+        padding: 16px;
+        border-radius: 8px;
+        font-size: 24px;
+        font-weight: bold;
+        text-align: center;
+      }
+      .status-success-blue {
+        background: #2563eb;
+        color: #ffffff;
+      }
+      .status-success-green {
+        background: #22c55e;
+        color: #ffffff;
+      }
+      .status-error {
+        background: #b91c1c;
+        color: #ffffff;
+      }
+      .status-subtext {
+        font-size: 14px;
+        font-weight: normal;
+        margin-top: 4px;
+        opacity: 0.9;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        font-size: 14px;
+      }
+      th,
+      td {
+        border: 1px solid #374151;
+        padding: 6px 8px;
+        text-align: left;
+      }
+      th {
+        background: #111827;
+      }
+      .small-text {
+        font-size: 12px;
+        opacity: 0.75;
+      }
+      .flex-row {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .flex-item {
+        flex: 1 1 260px;
+      }
+      button {
+        padding: 8px 16px;
+        border-radius: 4px;
+        border: none;
+        cursor: pointer;
+        font-weight: bold;
+        background: #4b5563;
+        color: #e5e7eb;
+      }
+      button:hover {
+        filter: brightness(1.1);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <h1>FILLOGIC ASSET</h1>
+
+      <div class="panel">
+        <h2>1. Upload reference file</h2>
+        <p class="small-text">
+          Use the same reference document you use today (CSV). We'll look for a
+          column named
+          <code>UPC</code> (case-insensitive). If not found, the first column is
+          treated as the UPC.
+        </p>
+        <input type="file" id="referenceFile" accept=".csv" />
+        <div
+          id="referenceStatus"
+          class="small-text"
+          style="margin-top: 8px"
+        ></div>
+      </div>
+
+      <div class="panel">
+        <h2>2. Scan / type UPC</h2>
+        <div class="flex-row">
+          <div class="flex-item">
+            <label for="scanInput">Scan UPC here</label>
+            <input
+              type="text"
+              id="scanInput"
+              placeholder="Focus here and scan..."
+              autocomplete="off"
+            />
+            <div id="scanStatus" class="status-box" style="display: none"></div>
+          </div>
+          <div class="flex-item">
+            <h3 style="margin-top: 0">Session Totals (by UPC)</h3>
+            <div class="small-text">
+              Each time you scan a valid UPC, its quantity increments here. This
+              is the data we'll send to Google Sheets when you end the session.
+            </div>
+            <table id="sessionTable" style="display: none">
+              <thead id="sessionTableHead"></thead>
+              <tbody id="sessionTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div style="margin-top: 16px">
+          <button id="endSessionBtn">End Session & Upload</button>
+          <span
+            id="uploadStatus"
+            class="small-text"
+            style="margin-left: 8px"
+          ></span>
+        </div>
+      </div>
+    </div>
+
+    <audio id="errorBeep">
+      <source
+        src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA="
+        type="audio/wav"
+      />
+    </audio>
+
+    <script>
+      // =========================
+      // CONFIG: set your Web App URL here (plain /macros/s/.../exec)
+      // =========================
+      const WEB_APP_URL = "YOUR_WEB_APP_URL";
+
+      // --- Reference data ---
+      // Each reference row now has both UPC and Number for lookup.
+      let referenceRows = []; // array of { row: string[], upc: string, number: string }
+      let header = [];
+      let upcColIndex = 0;
+      let numberColIndex = -1;
+
+      // --- Session data: UPC -> { row: string[], qty: number } ---
+      const sessionTotals = new Map();
+
+      // Alternate success colors: true -> blue, false -> green
+      let nextSuccessBlue = true;
+
+      // Timer for auto-submit after scan
+      let scanBufferTimer = null;
+
+      // Session ID for grouping uploads
+      let currentSessionId = createSessionId();
+
+      const referenceFileInput = document.getElementById("referenceFile");
+      const referenceStatus = document.getElementById("referenceStatus");
+      const scanInput = document.getElementById("scanInput");
+      const scanStatus = document.getElementById("scanStatus");
+      const errorBeep = document.getElementById("errorBeep");
+
+      const sessionTable = document.getElementById("sessionTable");
+      const sessionTableHead = document.getElementById("sessionTableHead");
+      const sessionTableBody = document.getElementById("sessionTableBody");
+
+      const endSessionBtn = document.getElementById("endSessionBtn");
+      const uploadStatus = document.getElementById("uploadStatus");
+
+      referenceFileInput.addEventListener("change", handleReferenceFile);
+      scanInput.addEventListener("keydown", handleScanKeydown);
+      // Removed auto-submit on every input so manual typing doesn't auto-fire
+      // scanInput.addEventListener("input", handleScanInput);
+      endSessionBtn.addEventListener("click", handleEndSession);
+
+      window.addEventListener("load", () => {
+        scanInput.focus();
+      });
+
+      function handleReferenceFile(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = e.target.result;
+          try {
+            parseReferenceCsv(text);
+            referenceStatus.textContent = `Loaded ${referenceRows.length} rows from reference file.`;
+            referenceStatus.style.color = "#22c55e";
+            scanInput.focus();
+          } catch (err) {
+            console.error(err);
+            referenceStatus.textContent =
+              "Failed to parse CSV. Make sure it is a simple comma-separated file.";
+            referenceStatus.style.color = "#f97373";
+          }
+        };
+        reader.readAsText(file);
+      }
+
+      function parseReferenceCsv(text) {
+        const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
+        if (lines.length < 2) {
+          throw new Error("Not enough rows");
+        }
+
+        header = splitCsvLine(lines[0]);
+
+        // Find UPC column (case-insensitive)
+        upcColIndex = header.findIndex((h) => h.trim().toLowerCase() === "upc");
+        if (upcColIndex === -1) {
+          upcColIndex = 0; // fallback: first column
+        }
+
+        // Find Number column (case-insensitive)
+        numberColIndex = header.findIndex(
+          (h) => h.trim().toLowerCase() === "number"
+        );
+
+        referenceRows = [];
+        for (let i = 1; i < lines.length; i++) {
+          const row = splitCsvLine(lines[i]);
+          if (row.length === 0) continue;
+
+          const upc = (row[upcColIndex] || "").trim();
+          const number =
+            numberColIndex >= 0 ? (row[numberColIndex] || "").trim() : "";
+
+          // Skip rows that have neither a UPC nor a Number
+          if (!upc && !number) continue;
+
+          referenceRows.push({ row, upc, number });
+        }
+
+        // Reset session data when new reference is loaded
+        sessionTotals.clear();
+        updateSessionTable();
+        clearScanStatus();
+        uploadStatus.textContent = "";
+      }
+
+      // Very simple CSV splitter (no advanced quoting)
+      function splitCsvLine(line) {
+        return line.split(",").map((v) => v.trim());
+      }
+
+      function handleScanKeydown(e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const value = scanInput.value.trim();
+          if (!value) return;
+          handleScan(value);
+          scanInput.value = "";
+        }
+      }
+
+      // Automatically submit scan after scanner finishes input (no need to press Enter)
+      function handleScanInput() {
+        if (scanBufferTimer) {
+          clearTimeout(scanBufferTimer);
+        }
+        const value = scanInput.value.trim();
+        if (!value) return;
+
+        // Small delay after last character to treat as "scan complete"
+        scanBufferTimer = setTimeout(() => {
+          const finalValue = scanInput.value.trim();
+          if (!finalValue) return;
+          handleScan(finalValue);
+          scanInput.value = "";
+        }, 150);
+      }
+
+      function handleScan(codeScanned) {
+        if (!referenceRows.length) {
+          showErrorStatus(
+            "NO REFERENCE LOADED",
+            "Upload a reference file first."
+          );
+          playErrorBeep();
+          return;
+        }
+
+        const code = codeScanned.trim();
+
+        // Match by UPC or by Number (Column B)
+        const match = referenceRows.find(
+          (r) => r.upc === code || (r.number && r.number === code)
+        );
+
+        if (!match) {
+          showErrorStatus("ITEM NOT FOUND", `VALUE: ${code}`);
+          playErrorBeep();
+          return;
+        }
+
+        registerSuccessfulScan(match);
+      }
+
+      function registerSuccessfulScan(match) {
+        const { row, upc } = match;
+
+        // Update sessionTotals map
+        if (!sessionTotals.has(upc)) {
+          sessionTotals.set(upc, { row: [...row], qty: 0 });
+        }
+        const entry = sessionTotals.get(upc);
+        entry.qty += 1;
+
+        updateSessionTable();
+        showSuccessStatus(upc);
+      }
+
+      function updateSessionTable() {
+        if (sessionTotals.size === 0) {
+          sessionTable.style.display = "none";
+          sessionTableHead.innerHTML = "";
+          sessionTableBody.innerHTML = "";
+          return;
+        }
+
+        sessionTable.style.display = "table";
+
+        const displayHeader = [...header, "qty"];
+        sessionTableHead.innerHTML =
+          "<tr>" +
+          displayHeader.map((h) => "<th>" + escapeHtml(h) + "</th>").join("") +
+          "</tr>";
+
+        const rowsHtml = [];
+        for (const [upc, entry] of sessionTotals.entries()) {
+          const cells = [...entry.row, String(entry.qty)];
+          rowsHtml.push(
+            "<tr>" +
+              cells.map((c) => "<td>" + escapeHtml(c) + "</td>").join("") +
+              "</tr>"
+          );
+        }
+        sessionTableBody.innerHTML = rowsHtml.join("");
+      }
+
+      function showSuccessStatus(upc) {
+        const useBlue = nextSuccessBlue;
+        scanStatus.style.display = "block";
+        scanStatus.className =
+          "status-box " +
+          (useBlue ? "status-success-blue" : "status-success-green");
+
+        // Also update the entire page background to match
+        document.body.style.backgroundColor = useBlue ? "#1d4ed8" : "#15803d";
+
+        nextSuccessBlue = !nextSuccessBlue;
+
+        scanStatus.innerHTML =
+          "SUCCESSFUL SCAN" +
+          '<div class="status-subtext">UPC: ' +
+          escapeHtml(upc) +
+          "</div>";
+      }
+
+      function showErrorStatus(mainText, subText) {
+        scanStatus.style.display = "block";
+        scanStatus.className = "status-box status-error";
+        scanStatus.innerHTML =
+          escapeHtml(mainText) +
+          (subText
+            ? '<div class="status-subtext">' + escapeHtml(subText) + "</div>"
+            : "");
+      }
+
+      function clearScanStatus() {
+        scanStatus.style.display = "none";
+        scanStatus.className = "status-box";
+        scanStatus.textContent = "";
+        // Reset to default background
+        document.body.style.backgroundColor = "#111827";
+      }
+
+      function playErrorBeep() {
+        if (!errorBeep) return;
+        errorBeep.currentTime = 0;
+        errorBeep.play().catch(() => {});
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      function createSessionId() {
+        return (
+          new Date().toISOString() +
+          "_" +
+          Math.random().toString(36).slice(2, 8)
+        );
+      }
+
+      // Map original header names to desired names (for the sheet)
+      function mapHeaderName(h) {
+        if (h === "ItemUPC") return "PC13 UPC";
+        if (h === "Number") return "PC13 Number";
+        if (h === "Name") return "PC9";
+        if (h === "Dim1") return "Dim1";
+        if (h === "Dim2") return "Dim2";
+        if (h === "Color") return "Color";
+        if (h === "Description") return "Description";
+        if (h === "Correlated Bucket SKU") return "Correlated Bucket SKU";
+        if (h === "Brand Name") return "Brand Name";
+        return h;
+      }
+
+      function handleEndSession() {
+        uploadStatus.textContent = "";
+        uploadStatus.style.color = "#e5e7eb";
+
+        if (!referenceRows.length || header.length === 0) {
+          uploadStatus.textContent = "No reference loaded; nothing to upload.";
+          uploadStatus.style.color = "#f97373";
+          return;
+        }
+
+        if (sessionTotals.size === 0) {
+          uploadStatus.textContent = "No scans to upload for this session.";
+          uploadStatus.style.color = "#f97373";
+          return;
+        }
+
+        if (
+          !WEB_APP_URL ||
+          WEB_APP_URL.indexOf("PASTE_YOUR_WEB_APP_URL_HERE") !== -1
+        ) {
+          uploadStatus.textContent =
+            "WEB_APP_URL is not set. Edit the HTML file and set WEB_APP_URL.";
+          uploadStatus.style.color = "#f97373";
+          return;
+        }
+
+        // Build final header list: rename originals, then add Quantity
+        const finalHeader = header.map(mapHeaderName).concat("Quantity");
+
+        const rows = [];
+        for (const [upc, entry] of sessionTotals.entries()) {
+          rows.push([...entry.row, String(entry.qty)]);
+        }
+
+        const payload = {
+          mode: "upc_session",
+          user: "unknown",
+          sessionId: currentSessionId,
+
+          header: finalHeader,
+          rows,
+        };
+
+        uploadStatus.textContent = "Uploading session...";
+
+        // Build GET URL with query parameters
+        const url = new URL(WEB_APP_URL);
+        url.searchParams.set("mode", "upc_session");
+        url.searchParams.set(
+          "payload",
+          encodeURIComponent(JSON.stringify(payload))
+        );
+
+        fetch(url.toString(), {
+          method: "GET",
+          mode: "no-cors",
+        })
+          .then(() => {
+            uploadStatus.textContent =
+              'Upload sent. Check the "UPC Session Compiled" sheet to confirm rows.';
+            uploadStatus.style.color = "#22c55e";
+
+            // Reset session
+            sessionTotals.clear();
+            updateSessionTable();
+            clearScanStatus();
+            currentSessionId = createSessionId();
+          })
+          .catch((err) => {
+            console.error(err);
+            uploadStatus.textContent = "Upload error: " + err.message;
+            uploadStatus.style.color = "#f97373";
+          });
+      }
+    </script>
+  </body>
+</html>
